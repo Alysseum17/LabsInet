@@ -248,100 +248,230 @@ CA (self-signed, CN=color CA)
 
 ## Крок 1. Створення CA та сертифікатів (на VM1)
 
-### 1.1. Каталог та приватний ключ CA
+Лектор показував **класичну структуру CA**, яку очікує стандартний модуль `openssl ca` (а не "саморобний" `openssl x509 -req`, як роблять у спрощених варіантах). Робимо саме так — відтворюємо структуру зі скріншота і далі користуємось командою `openssl ca`, яка сама веде облік виданих сертифікатів.
+
+### 1.1. Структура каталогів CA
 
 ```bash
-sudo mkdir -p /etc/ssl/colorCA/{private,certs}
-cd /etc/ssl/colorCA
-sudo openssl genrsa -out private/ca.key.pem 4096
-sudo chmod 400 private/ca.key.pem
+mkdir ca
+cd ca
+mkdir certs crl newcerts private
+chmod 700 private
 ```
 
-| Частина команди | Що означає |
+| Каталог | Що в ньому зберігається |
 |---|---|
-| `genrsa` | згенерувати приватний RSA-ключ |
-| `-out private/ca.key.pem` | куди зберегти ключ |
-| `4096` | довжина ключа в бітах (більше = надійніше, але повільніше; 4096 — стандартно для CA) |
-| `chmod 400` | лише власник може читати файл, ніхто більше — приватний ключ CA критично важливий |
+| `certs/` | копії **виданих** сертифікатів (сюди ж кладемо і сам сертифікат CA) |
+| `crl/` | список відкликаних сертифікатів (Certificate Revocation List) — якщо колись доведеться відкликати серверний сертифікат |
+| `newcerts/` | **автоматичний архів** — щоразу, коли `openssl ca` підписує новий сертифікат, копія лягає сюди під ім'ям `<серійний_номер>.pem`. Це і є "база даних" CA в чистому вигляді |
+| `private/` | приватний ключ CA. `chmod 700` — доступ лише власнику каталогу, бо це найкритичніший файл у всій лабораторній |
 
-### 1.2. Самопідписаний сертифікат CA
+На скріншоті видно саме ці чотири теки — далі додаємо ще три **службові файли**, без яких команда `openssl ca` просто відмовиться працювати:
 
 ```bash
-sudo openssl req -x509 -new -nodes -key private/ca.key.pem -sha256 -days 3650 \
-  -subj "/C=UA/ST=Ukraine/L=Kyiv/O=KPI/OU=OT/CN=color CA" \
-  -out certs/ca.cert.pem
+touch index.txt
+echo 1000 > serial
+echo 1000 > crlnumber
+```
+
+| Файл | Що означає |
+|---|---|
+| `index.txt` | **база виданих сертифікатів** — текстовий "журнал": статус (valid/revoked), термін дії, серійний номер, Subject кожного виданого сертифіката. Спочатку порожній, `openssl ca` дописує туди рядок при кожному підписанні |
+| `serial` | **наступний серійний номер**, який буде присвоєно черговому сертифікату (кожен сертифікат CA мусить мати унікальний номер; тут стартуємо з `1000`) |
+| `crlnumber` | те саме, але для нумерації списків відкликання (CRL) |
+
+### 1.2. Файл конфігурації `openssl.cnf`
+
+Команда `openssl ca` (на відміну від `openssl x509 -req`) **обов'язково** читає конфіг, де описано, де лежать усі ці каталоги й файли. Створюємо його прямо в `~/ca/openssl.cnf`:
+
+```bash
+nano openssl.cnf
+```
+
+```ini
+[ ca ]
+default_ca = CA_default
+
+[ CA_default ]
+dir               = .
+certs             = $dir/certs
+crl_dir           = $dir/crl
+new_certs_dir     = $dir/newcerts
+database          = $dir/index.txt
+serial            = $dir/serial
+crlnumber         = $dir/crlnumber
+private_key       = $dir/private/ca.key.pem
+certificate       = $dir/certs/ca.cert.pem
+default_md        = sha256
+default_days      = 825
+default_crl_days  = 30
+policy            = policy_match
+copy_extensions   = copy
+
+[ policy_match ]
+countryName             = match
+stateOrProvinceName     = match
+organizationName        = match
+organizationalUnitName  = optional
+commonName              = supplied
+
+[ req ]
+default_bits       = 2048
+default_md          = sha256
+distinguished_name  = req_distinguished_name
+x509_extensions     = v3_ca
+prompt              = no
+
+[ req_distinguished_name ]
+C  = UA
+ST = Ukraine
+L  = Kyiv
+O  = KPI
+OU = OT
+CN = color CA
+
+[ v3_ca ]
+basicConstraints = critical, CA:true
+keyUsage         = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+
+[ server_cert ]
+basicConstraints = CA:FALSE
+keyUsage         = digitalSignature, keyEncipherment
+extendedKeyUsage  = serverAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+```
+
+Що тут головне:
+
+| Секція / рядок | Що означає |
+|---|---|
+| `[ CA_default ]` | звідки `openssl ca` бере всі шляхи — саме тут прописані ті каталоги й файли з кроку 1.1 |
+| `policy = policy_match` | правило: у кожного серверного сертифіката, який ми підпишемо, поля `C`, `ST`, `O` **мають збігатися** з CA (так заведено на реальних CA — "ти підписаний саме цим CA, тобою ж заявленим у Subject"), а `CN` — довільний (своє ім'я сервера) |
+| `[ req_distinguished_name ]` | Subject/Issuer самого CA — тут проставлені точні значення варіанту: `C=UA, ST=Ukraine, L=Kyiv, O=KPI, OU=OT, CN=color CA` |
+| `prompt = no` | не питати ці поля інтерактивно, а брати з конфігу напряму |
+| `[ v3_ca ]` | розширення X.509 для сертифіката CA: `CA:true` — позначка "це справді CA, йому можна підписувати інші сертифікати" |
+| `[ server_cert ]` | розширення, які накладатимемо на **серверні** сертифікати (не на сам CA): `CA:FALSE` — сервер не може видавати інші сертифікати, `extendedKeyUsage = serverAuth` — сертифікат призначений саме для автентифікації сервера (TLS) |
+
+### 1.3. Ключ і самопідписаний сертифікат CA
+
+```bash
+openssl genrsa -out private/ca.key.pem 4096
+chmod 400 private/ca.key.pem
+
+openssl req -config openssl.cnf -x509 -new -key private/ca.key.pem \
+  -days 3650 -extensions v3_ca -out certs/ca.cert.pem
 ```
 
 | Прапорець | Що означає |
 |---|---|
-| `req` | режим "запит на сертифікат" (тут одразу створюємо і сертифікат) |
-| `-x509` | замість звичайного CSR одразу згенерувати **готовий сертифікат** (бо CA підписує сам себе) |
-| `-new` | новий запит |
-| `-nodes` | **no DES** — не шифрувати приватний ключ паролем (спрощує автоматизацію в лабораторній; у продакшені так не роблять) |
+| `genrsa ... 4096` | згенерувати приватний RSA-ключ довжиною 4096 біт — це і є секрет, яким CA підписуватиме всі сертифікати |
+| `chmod 400` | лише власник може навіть прочитати файл |
+| `-config openssl.cnf` | явно вказуємо наш конфіг (замість системного за замовчуванням) |
+| `-x509` | одразу згенерувати готовий сертифікат, а не CSR (бо CA підписує сам себе) |
 | `-key private/ca.key.pem` | яким ключем підписувати |
-| `-sha256` | алгоритм хешування для підпису |
-| `-days 3650` | термін дії сертифіката (10 років — це CA, довгостроковий) |
-| `-subj "..."` | Subject/Issuer сертифіката — **точно за варіантом**: C=UA, ST=Ukraine, L=Kyiv, O=KPI, OU=OT, CN=color CA. Для самопідписаного CA Issuer завжди дорівнює Subject |
-| `-out certs/ca.cert.pem` | готовий файл сертифіката CA (це саме той файл, який далі додаємо у довірені) |
+| `-days 3650` | термін дії 10 років — стандартно для кореневого CA |
+| `-extensions v3_ca` | застосувати саме секцію `[v3_ca]` з конфігу (`CA:true` тощо) |
+| `-out certs/ca.cert.pem` | результат — публічний сертифікат CA, саме його далі розповсюджуємо як довірений |
 
-### 1.3. Сертифікат для `mail.color.edu`
+Перевірити, що Subject і Issuer виставились правильно:
 
 ```bash
-sudo mkdir -p /etc/ssl/colorCA/server-color
-cd /etc/ssl/colorCA/server-color
+openssl x509 -in certs/ca.cert.pem -noout -subject -issuer
+```
 
-# ключ сервера
-sudo openssl genrsa -out mail.color.edu.key.pem 2048
+Очікується, що обидва рядки однакові: `C=UA, ST=Ukraine, L=Kyiv, O=KPI, OU=OT, CN=color CA` (самопідписаний сертифікат — сам собі і видавець, і власник).
 
-# запит на підпис (CSR)
-sudo openssl req -new -key mail.color.edu.key.pem \
+### 1.4. Сертифікат для `mail.color.edu` — через `openssl ca`
+
+Спочатку, як завжди, ключ сервера і CSR (запит на підпис):
+
+```bash
+openssl genrsa -out private/mail.color.edu.key.pem 2048
+
+openssl req -new -key private/mail.color.edu.key.pem \
   -subj "/C=UA/ST=Ukraine/L=Kyiv/O=KPI/OU=OT/CN=mail.color.edu" \
   -out mail.color.edu.csr.pem
+```
 
-# підписуємо своїм CA
-sudo openssl x509 -req -in mail.color.edu.csr.pem \
-  -CA /etc/ssl/colorCA/certs/ca.cert.pem -CAkey /etc/ssl/colorCA/private/ca.key.pem \
-  -CAcreateserial -sha256 -days 825 \
-  -out mail.color.edu.cert.pem
+А тепер — **замість** `openssl x509 -req` — правильна команда підпису через щойно побудовану структуру CA:
+
+```bash
+openssl ca -config openssl.cnf -extensions server_cert \
+  -days 825 -notext -md sha256 \
+  -in mail.color.edu.csr.pem -out certs/mail.color.edu.cert.pem
 ```
 
 | Прапорець | Що означає |
 |---|---|
-| `-CA ...ca.cert.pem` | яким сертифікатом підписуємо (нашого CA) |
-| `-CAkey ...ca.key.pem` | яким приватним ключем CA підписуємо |
-| `-CAcreateserial` | створити файл із серійними номерами виданих сертифікатів (щоб кожен наступний сертифікат мав унікальний серійник) |
-| `-days 825` | термін дії серверного сертифіката (типове практичне обмеження — до ~2 років) |
+| `ca` | режим "підписати запит як центр сертифікації" (а не просто сконвертувати файл, як робив `x509 -req`) |
+| `-config openssl.cnf` | звідки брати `index.txt`, `serial`, приватний ключ CA і політику `policy_match` |
+| `-extensions server_cert` | застосувати до цього сертифіката розширення саме для сервера (`CA:FALSE`, `serverAuth`) — на відміну від `v3_ca`, яке ми застосовували до самого CA |
+| `-days 825` | термін дії серверного сертифіката (~2 роки) |
+| `-notext` | не дублювати людинозрозумілий текст сертифіката у файлі, лишити тільки сам PEM-блок |
+| `-md sha256` | алгоритм хешування підпису |
+| `-in ...csr.pem` | запит, який підписуємо |
+| `-out certs/...cert.pem` | куди зберегти готовий сертифікат |
 
-Важливо: **CN серверного сертифіката має точно збігатись з іменем, за яким до сервера звертаються** (`mail.color.edu`), інакше клієнти видаватимуть попередження про невідповідність імені.
+Під час виконання `openssl ca` запитає підтвердження (`Sign the certificate? [y/n]`, `1 out of 1 certificate requests certified, commit? [y/n]`) — двічі відповісти `y`. Після цього:
+* у `certs/mail.color.edu.cert.pem` — готовий сертифікат;
+* у `newcerts/1000.pem` — його копія під серійним номером;
+* у `index.txt` з'явився новий рядок із записом про виданий сертифікат;
+* `serial` автоматично збільшився до наступного номера (`1001`) для наступного сертифіката.
 
-### 1.4. Сертифікат для `mail.zone06.net` (теж на VM1, тому що тут CA)
+Подивитись журнал виданих сертифікатів:
 
 ```bash
-sudo mkdir -p /etc/ssl/colorCA/server-zone06
-cd /etc/ssl/colorCA/server-zone06
+cat index.txt
+```
 
-sudo openssl genrsa -out mail.zone06.net.key.pem 2048
+### 1.5. Сертифікат для `mail.zone06.net` (теж тут, бо CA лише на VM1)
 
-sudo openssl req -new -key mail.zone06.net.key.pem \
+```bash
+openssl genrsa -out private/mail.zone06.net.key.pem 2048
+
+openssl req -new -key private/mail.zone06.net.key.pem \
   -subj "/C=UA/ST=Ukraine/L=Kyiv/O=KPI/OU=OT/CN=mail.zone06.net" \
   -out mail.zone06.net.csr.pem
 
-sudo openssl x509 -req -in mail.zone06.net.csr.pem \
-  -CA /etc/ssl/colorCA/certs/ca.cert.pem -CAkey /etc/ssl/colorCA/private/ca.key.pem \
-  -CAcreateserial -sha256 -days 825 \
-  -out mail.zone06.net.cert.pem
+openssl ca -config openssl.cnf -extensions server_cert \
+  -days 825 -notext -md sha256 \
+  -in mail.zone06.net.csr.pem -out certs/mail.zone06.net.cert.pem
 ```
 
-### 1.5. Перевірка сертифіката
+Після цього в `index.txt` буде вже два рядки, а `serial` — `1002`.
+
+### 1.6. Перевірка сертифікатів
 
 ```bash
-openssl x509 -in mail.color.edu.cert.pem -noout -text | head -20
-openssl verify -CAfile /etc/ssl/colorCA/certs/ca.cert.pem mail.color.edu.cert.pem
+openssl x509 -in certs/mail.color.edu.cert.pem -noout -text | head -20
+openssl verify -CAfile certs/ca.cert.pem certs/mail.color.edu.cert.pem
+openssl verify -CAfile certs/ca.cert.pem certs/mail.zone06.net.cert.pem
 ```
 
-Очікується: `mail.color.edu.cert.pem: OK`.
+Очікується `OK` для обох. Важливо: **CN серверного сертифіката має точно збігатись з іменем, за яким до сервера звертаються** (`mail.color.edu`), інакше клієнти видаватимуть попередження про невідповідність імені.
 
-### 1.6. Перенести сертифікат зони2 та CA на VM2
+### 1.7. Розкласти готові файли по робочих каталогах служб
+
+Решта лабораторної (Postfix/Dovecot) очікує сертифікати за фіксованими шляхами — переносимо туди готові файли з `~/ca`:
+
+```bash
+mkdir -p /etc/ssl/colorCA/certs /etc/ssl/colorCA/server-color /etc/ssl/colorCA/server-zone06
+
+cp ~/ca/certs/ca.cert.pem                 /etc/ssl/colorCA/certs/
+cp ~/ca/certs/mail.color.edu.cert.pem     /etc/ssl/colorCA/server-color/
+cp ~/ca/private/mail.color.edu.key.pem    /etc/ssl/colorCA/server-color/
+cp ~/ca/certs/mail.zone06.net.cert.pem    /etc/ssl/colorCA/server-zone06/
+cp ~/ca/private/mail.zone06.net.key.pem   /etc/ssl/colorCA/server-zone06/
+
+chmod 400 /etc/ssl/colorCA/server-color/mail.color.edu.key.pem
+chmod 400 /etc/ssl/colorCA/server-zone06/mail.zone06.net.key.pem
+```
+
+> `~/ca` лишається "майстернею" CA (там живуть `index.txt`, `serial`, приватний ключ CA — тобто все, чим підписуємо) і далі знадобиться, якщо треба буде видати ще один сертифікат або відкликати існуючий. `/etc/ssl/colorCA/...` — те, що реально читають Postfix і Dovecot.
+
+### 1.8. Перенести сертифікат зони2 та CA на VM2
 
 ```bash
 # на VM1
@@ -361,7 +491,7 @@ sudo mv /tmp/mail.zone06.net.key.pem  /etc/ssl/mail/
 sudo chmod 400 /etc/ssl/mail/mail.zone06.net.key.pem
 ```
 
-### 1.7. Додати CA у довірені на обох ВМ
+### 1.9. Додати CA у довірені на обох ВМ
 
 ```bash
 sudo cp /etc/ssl/colorCA/certs/ca.cert.pem /usr/local/share/ca-certificates/colorCA.crt
@@ -369,6 +499,17 @@ sudo update-ca-certificates
 ```
 
 `update-ca-certificates` перечитує всі файли з `/usr/local/share/ca-certificates/` і додає їх у загальносистемне сховище довірених CA (`/etc/ssl/certs/ca-certificates.crt`) — після цього і `openssl`, і Postfix, і Dovecot довірятимуть нашим сертифікатам без попереджень.
+
+### 1.10. Якщо колись треба відкликати сертифікат (CRL)
+
+Це поза обов'язковим завданням, але лектор може спитати — для чого тоді `crl/` і `crlnumber`:
+
+```bash
+openssl ca -config openssl.cnf -revoke certs/mail.zone06.net.cert.pem
+openssl ca -config openssl.cnf -gencrl -out crl/color-ca.crl.pem
+```
+
+Перша команда позначає сертифікат у `index.txt` як `R` (revoked), друга — генерує сам список відкликаних сертифікатів (CRL), який у реальному світі публікується, щоб клієнти могли перевіряти, чи сертифікат ще дійсний, навіть якщо термін його дії формально не минув.
 
 ---
 
