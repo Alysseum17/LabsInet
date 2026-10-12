@@ -927,7 +927,7 @@ sudo nano /etc/dovecot/conf.d/10-mail.conf
 ```
 
 ```conf
-mail_location = maildir:/var/mail/vhosts/%d/%n/Maildir
+mail_path = maildir:/var/mail/vhosts/%d/%n/Maildir
 mail_uid = vmail
 mail_gid = vmail
 first_valid_uid = 5000
@@ -959,9 +959,9 @@ sudo nano /etc/dovecot/conf.d/10-ssl.conf
 
 ```conf
 ssl = required
-ssl_cert = </etc/ssl/colorCA/server-color/mail.color.edu.cert.pem
-ssl_key  = </etc/ssl/colorCA/server-color/mail.color.edu.key.pem
-ssl_ca   = </etc/ssl/colorCA/certs/ca.cert.pem
+ssl_server_cert_file = </etc/ssl/colorCA/server-color/mail.color.edu.cert.pem
+ssl_server_key_file  = </etc/ssl/colorCA/server-color/mail.color.edu.key.pem
+ssl_server_ca_file   = </etc/ssl/colorCA/certs/ca.cert.pem
 ```
 
 | Параметр | Що означає |
@@ -1029,7 +1029,7 @@ sudo nano /etc/dovecot/conf.d/10-auth.conf
 ```
 
 ```conf
-disable_plaintext_auth = yes
+disable_plaintext_auth = yes - не працює
 auth_mechanisms = plain login
 !include auth-system.conf.ext
 ```
