@@ -12,7 +12,7 @@
 | Поштові скриньки Домену 1 | red@color.edu, green@color.edu, blue@color.edu |
 | Поштові скриньки Домену 2 | black@zone06.net, white@zone06.net |
 
-Використовуємо: **Postfix** (MTA), **Dovecot** (POP3/IMAP), **OpenSSL** (CA і сертифікати), для тестів — **telnet**, **openssl s_client**, **swaks**.
+Використовуємо: **Postfix** (MTA), **Dovecot 2.4** (POP3/IMAP + SASL), **OpenSSL** (CA і сертифікати), для тестів — **telnet**, **openssl s_client**, **swaks**. ОС на VM — Debian 13.
 
 ---
 
@@ -39,8 +39,8 @@
 * **MUA (Mail User Agent)** — поштовий клієнт, яким користується людина: Thunderbird, Outlook, веб-інтерфейс, `mutt`. Відправляє через SMTP, забирає через POP3/IMAP.
 * **MSA (Mail Submission Agent)** — приймає лист від MUA (зазвичай порт **587**), обов'язково **автентифікує** користувача — це і є та сама "обов'язкова автентифікація при відправленні", про яку йдеться в завданні. Фактично на практиці MSA і MTA — та сама програма (Postfix), просто по-різному налаштована на різних портах.
 * **MTA (Mail Transfer Agent)** — програма-поштовик, яка пересилає лист від сервера до сервера по протоколу SMTP, порт **25**. Кожен домен має свій MTA, який є "кінцевим отримувачем" для листів на цей домен (саме це вимагає п. 2.3 завдання).
-* **MDA (Mail Delivery Agent)** — кладе прийнятий лист у поштову скриньку конкретного користувача на диску (у нашому випадку ця роль вбудована в Dovecot/Postfix через `lmtp` або локальну доставку).
-* **MAA / POP3-IMAP сервер** — надає МUA доступ до вже прийнятих листів (Dovecot).
+* **MDA (Mail Delivery Agent)** — кладе прийнятий лист у поштову скриньку конкретного користувача на диску. У нашій конфігурації цю роль виконує вбудований віртуальний агент доставки Postfix (`virtual`), який пише листи напряму в Maildir під UID `vmail`.
+* **MAA / POP3-IMAP сервер** — надає MUA доступ до вже прийнятих листів (Dovecot).
 
 **Важлива відмінність, яку часто плутають:** SMTP — це протокол **тільки для відправки/пересилки** пошти (від клієнта до сервера і між серверами). Для **забирання** пошти клієнтом використовуються **інші** протоколи — POP3 або IMAP. SMTP ніколи не "видає" листи клієнту.
 
@@ -202,7 +202,7 @@ zone06.net.  MX  10  mail.zone06.net.
 
 ## 1.7. TLS у пошті
 
-Є два різних способи "додати шифрування" — і в лабораторній треба реалізувати саме перший (STARTTLS), бо саме so вимагають стандартні порти SMTP submission/POP3/IMAP:
+Є два різних способи "додати шифрування" — і в лабораторній треба реалізувати саме перший (STARTTLS), бо саме його вимагають стандартні порти SMTP submission/POP3/IMAP:
 
 * **STARTTLS (opportunistic/explicit TLS)** — з'єднання **починається як звичайний нешифрований** текстовий діалог на стандартному порту (25 для SMTP, 110 для POP3, 143 для IMAP), і лише після команди `STARTTLS` з'єднання "перемикається" на шифрування, продовжуючи той самий TCP-канал.
 * **Implicit TLS (SMTPS/POP3S/IMAPS)** — шифрування вмикається **одразу**, ще до будь-якого тексту протоколу, на окремих виділених портах: **465** (SMTPS), **995** (POP3S), **993** (IMAPS).
@@ -228,7 +228,7 @@ CA (self-signed, CN=color CA)
 
 **Важливо:** Base64 — це **не шифрування**, а лише кодування. Тому `AUTH` без попереднього `STARTTLS` передає пароль практично у відкритому вигляді — саме тому автентифікацію дозволяють лише **після** встановлення TLS.
 
-На практиці в Postfix автентифікацію реалізує Dovecot через **`dovecot SASL`** — тобто Postfix не перевіряє паролі сам, а звертається до Dovecot через сокет, а Dovecot вже перевіряє пароль системного (або віртуального) користувача. Це та сама технічна причина, чому Dovecot потрібно налаштувати **до або одночасно** з автентифікацією в Postfix.
+На практиці в Postfix автентифікацію реалізує Dovecot через **Dovecot SASL** — тобто Postfix не перевіряє паролі сам, а звертається до Dovecot через Unix-сокет, а Dovecot вже перевіряє пароль віртуального користувача зі свого файлу `/etc/dovecot/users`. Це та сама технічна причина, чому Dovecot потрібно налаштувати **до або одночасно** з автентифікацією в Postfix.
 
 ## 1.9. Що таке Postfix і Dovecot взагалі, і навіщо кожен файл
 
@@ -238,17 +238,17 @@ CA (self-signed, CN=color CA)
 
 Postfix — це програма-демон (фонова служба), яка:
 * **приймає** листи по SMTP — і від локальних клієнтів (MUA, порт 587), і від інших поштових серверів (порт 25);
-* **вирішує**, куди лист далі: якщо домен отримувача "свій" (є в `mydestination`) — кладе лист у скриньку локального користувача; якщо домен чужий — сама підключається по SMTP до MX-сервера цього домену і пересилає лист туди;
+* **вирішує**, куди лист далі: якщо домен отримувача "свій" (є в `virtual_mailbox_domains`) — кладе лист у скриньку віртуального користувача; якщо домен чужий — сама підключається по SMTP до MX-сервера цього домену і пересилає лист туди;
 * **відправляє** листи, які відправляють наші користувачі, назовні (тобто працює і як MSA, і як MTA одночасно, просто на різних портах з різними правилами).
 
 Чого Postfix **не робить**: він не дає клієнту "забрати" листи (POP3/IMAP), і сам по собі не перевіряє паролі користувачів (для автентифікації він лише **питає** в Dovecot "чи правильний цей пароль?", а остаточне рішення — за Dovecot).
 
-### Dovecot — це MDA + POP3/IMAP-сервер (той, хто зберігає і видає пошту)
+### Dovecot — це POP3/IMAP-сервер (той, хто видає пошту) і перевіряч паролів
 
 Dovecot:
-* **зберігає** вже прийняті Postfix-ом листи на диску у форматі Maildir (кожен лист — окремий файл у `~/Maildir/new/` чи `~/Maildir/cur/`);
+* **читає** листи, які Postfix поклав на диск у форматі Maildir (кожен лист — окремий файл у `.../Maildir/new/` чи `.../Maildir/cur/`);
 * **видає** ці листи клієнту по POP3 або IMAP, коли клієнт підключається і вводить логін/пароль;
-* по сумісництву ще й **відповідає за автентифікацію для Postfix** — тому що Dovecot у будь-якому разі вже вміє перевіряти системні паролі (`/etc/shadow`) для входу по POP3/IMAP, і Postfix просто перевикористовує цю ж перевірку через спільний сокет замість того, щоб реалізовувати власну.
+* по сумісництву ще й **відповідає за автентифікацію для Postfix** — Dovecot у будь-якому разі вже вміє перевіряти паролі зі свого файлу `/etc/dovecot/users` для входу по POP3/IMAP, і Postfix просто перевикористовує цю ж перевірку через спільний сокет замість того, щоб реалізовувати власну.
 
 ### Як це виглядає разом (весь шлях одного листа)
 
@@ -266,7 +266,7 @@ MUA red@color.edu              MTA1 (Postfix, VM1)             MTA2 (Postfix, VM
        │                               │                               │                        │    забирає лист)       │
 ```
 
-Тобто **на кожній машині (VM1 і VM2) стоїть по дві незалежні служби**: Postfix і Dovecot, кожна зі своїм набором конфігів, і вони спілкуються між собою лише в одному вузькому місці — через Unix-сокет для SASL-автентифікації (крок 6.5 нижче).
+Тобто **на кожній машині (VM1 і VM2) стоїть по дві незалежні служби**: Postfix і Dovecot, кожна зі своїм набором конфігів, і вони спілкуються між собою лише в одному вузькому місці — через Unix-сокет для SASL-автентифікації (крок 6.5 нижче), а також через спільну теку з листами `/var/mail/vhosts`.
 
 ### Файли Postfix — коротко, що за що відповідає
 
@@ -274,36 +274,40 @@ MUA red@color.edu              MTA1 (Postfix, VM1)             MTA2 (Postfix, VM
 |---|---|
 | `/etc/postfix/main.cf` | **головний** конфіг — "хто я, який у мене домен, яким серверам довіряти, де TLS-сертифікат, коли вимагати автентифікацію" |
 | `/etc/postfix/master.cf` | список **служб-процесів**, які Postfix запускає і на яких портах — саме тут ми окремо описуємо "сервіс submission на порту 587" з іншими, суворішими правилами, ніж на звичайному порту 25 |
-| `/var/log/mail.log` | лог усього, що робить Postfix — кожне прийняте, відправлене чи відхилене повідомлення |
+| `/etc/postfix/vmailbox` (+ `vmailbox.db`) | мапа «поштова адреса → тека зі скринькою» для віртуальних користувачів |
+| журнал | на Debian 13 за замовчуванням `/var/log/mail.log` може не існувати (немає rsyslog) — логи дивимось через `journalctl` (див. Крок 7.4) |
 | `mailq` (команда, не файл) | показує чергу листів, які ще не доставлені |
 
 ### Файли Dovecot — коротко, що за що відповідає
 
-| Файл | За що відповідає |
+Dovecot 2.4 має новий синтаксис конфігурації (з обов'язковим рядком `dovecot_config_version`). Головний файл `dovecot.conf` лише підключає решту рядком `!include conf.d/*.conf`, тому налаштування розкидані по кількох файлах. Що реально діє, завжди видно командою `doveconf -n` — саме її вивід ми звіряємо з очікуваним у Кроці 6.
+
+| Файл / команда | За що відповідає |
 |---|---|
-| `/etc/dovecot/dovecot.conf` | "коренева" точка входу — тут вмикаються самі протоколи (`protocols = imap pop3`), решта підключається через `!include conf.d/*.conf` |
-| `/etc/dovecot/conf.d/10-mail.conf` | де і в якому форматі фізично зберігати листи користувача (`mail_location = maildir:~/Maildir`) |
-| `/etc/dovecot/conf.d/10-ssl.conf` | TLS-сертифікат/ключ для POP3S/IMAPS і правило "чи обов'язковий TLS" |
+| `/etc/dovecot/dovecot.conf` | "коренева" точка входу — версія конфіга, `protocols = imap pop3` і `!include conf.d/*.conf` |
+| `/etc/dovecot/conf.d/10-mail.conf` | де і в якому форматі фізично зберігати листи (`mail_driver = maildir`, `mail_path = ...`), UID/GID власника листів |
+| `/etc/dovecot/conf.d/10-ssl.conf` | TLS-сертифікат/ключ для POP3S/IMAPS і правило "чи обов'язковий TLS" (`ssl = required`) |
 | `/etc/dovecot/conf.d/10-master.conf` | які порти слухати (143/993/110/995) і — окремим блоком — опис сокета для SASL, яким користується Postfix |
-| `/etc/dovecot/conf.d/10-auth.conf` | яким способом перевіряти пароль (у нас — через окремий файл паролів, а не через системних Linux-користувачів, див. нижче) |
-| `/etc/dovecot/conf.d/auth-passwdfile.conf.ext` | підключає конкретний файл-джерело паролів (`passdb`) і правило, де шукати домашню теку/листи кожного користувача (`userdb`) |
+| `/etc/dovecot/conf.d/10-auth.conf` | які механізми автентифікації дозволені і який файл з описом бази користувачів підключити |
+| `/etc/dovecot/conf.d/auth-passwdfile.conf.ext` | описує `passdb` (звідки брати паролі: файл `/etc/dovecot/users`) і `userdb` (під яким UID і де лежить домашня тека кожного користувача) |
 | `/etc/dovecot/users` | **сам файл з логінами й паролями віртуальних скриньок** — наш аналог того, що лектор у Exim4 тримав у `/etc/exim4/` |
+| `doveconf -n` | не файл, а команда: показує лише ті параметри, що відрізняються від дефолтних, — найкраще, що можна додати до звіту як доказ налаштування |
 
 Коли далі в лабораторній будемо редагувати кожен із цих файлів — завжди тримай у голові це розділення: **Postfix вирішує, куди лист іде**, **Dovecot вирішує, де лист лежить і хто має право його забрати**.
 
 ### Віртуальні користувачі замість системних Linux-акаунтів
 
-У попередній версії лабораторної скриньки `red`, `green`, `blue` робились командою `useradd` — тобто кожна поштова адреса відповідала **реальному користувачу Linux** з власним домашнім каталогом і паролем у `/etc/shadow`. Це найпростіший спосіб, але не той, що показував лектор.
-
-Лектор (на Exim4) зберігав користувачів **в окремому текстовому файлі**, а не як системних акаунтів. Це називається **віртуальні користувачі (virtual mailboxes)**, і для пари Postfix+Dovecot цей файл за змістом належить **Dovecot**, бо саме Dovecot виконує автентифікацію — Postfix лише звертається до нього через SASL-сокет (крок 6.5) і сам файл ніколи не читає.
+Скриньки `red`, `green`, `blue` (і `black`, `white`) **не є** користувачами Linux. Це **віртуальні користувачі (virtual mailboxes)** — просто записи в окремому текстовому файлі, як у лектора на Exim4. Для пари Postfix+Dovecot цей файл за змістом належить **Dovecot**, бо саме Dovecot виконує автентифікацію — Postfix лише звертається до нього через SASL-сокет (крок 6.5) і сам файл ніколи не читає.
 
 Як це влаштовано:
 
-1. Заводиться **один службовий системний користувач** `vmail` (не плутати з поштовими скриньками!) — він не належить жодній людині, а є лише "технічним власником" файлів листів на диску, щоб Dovecot мав куди писати.
+1. Заводиться **один службовий системний користувач** `vmail` (UID/GID 5000; не плутати з поштовими скриньками!) — він не належить жодній людині, а є лише "технічним власником" файлів листів на диску.
 2. Усі листи всіх віртуальних скриньок лежать в одному спільному дереві `/var/mail/vhosts/<домен>/<ім'я>/Maildir/`, а не в розкиданих домашніх теках різних Linux-користувачів.
-3. У файлі `/etc/dovecot/users` — по рядку на кожну поштову адресу: логін (повна адреса `red@color.edu`) і пароль.
+3. У файлі `/etc/dovecot/users` — по рядку на кожну поштову адресу: логін (**повна адреса** `red@color.edu`) і пароль у форматі `{СХЕМА}пароль`.
 4. Dovecot при вході читає цей файл (`passdb`) і окремим правилом (`userdb`) обчислює, де на диску шукати листи саме цього користувача.
 5. Postfix при прийомі листа на `red@color.edu` дивиться в окрему мапу відповідності «адреса → шлях на диску» (`virtual_mailbox_maps`) і кладе лист туди напряму, під UID користувача `vmail`.
+
+Тобто **кожна нова скринька = чотири дії** (повний чек-лист — у Кроці 6.7): тека Maildir → рядок у `vmailbox` → `postmap` → рядок у `/etc/dovecot/users`. Логін при підключенні клієнта — завжди повна адреса.
 
 ---
 
@@ -314,9 +318,9 @@ MUA red@color.edu              MTA1 (Postfix, VM1)             MTA2 (Postfix, VM
 1. На VM1 створити свій CA і сертифікати для `mail.color.edu` і `mail.zone06.net`.
 2. Додати CA у довірені на VM1 та VM2.
 3. Додати MX/A-записи в DNS-зони з ЛР2 (`color.edu`, `zone06.net`) — це робимо на VM1 (master), бо саме там лежать файли зон.
-4. Встановити й налаштувати Postfix на VM1 (домен `color.edu`) і на VM2 (домен `zone06.net`): прийом пошти, TLS, обов'язкова автентифікація при відправленні.
-5. Створити поштові скриньки (системних користувачів) red/green/blue на VM1, black/white на VM2.
-6. Встановити й налаштувати Dovecot на обох — POP3S/IMAPS + SASL для Postfix.
+4. Встановити Postfix і Dovecot на обох VM.
+5. Налаштувати Postfix на VM1 (домен `color.edu`) і на VM2 (домен `zone06.net`): прийом пошти, TLS, обов'язкова автентифікація при відправленні, **віртуальні скриньки** red/green/blue (VM1) і black/white (VM2).
+6. Налаштувати Dovecot на обох: POP3S/IMAPS, SASL-сокет для Postfix, файл віртуальних користувачів `/etc/dovecot/users`.
 7. Перевірити все: telnet (звичайний SMTP-діалог), openssl s_client (STARTTLS, сертифікат), swaks (лист з автентифікацією), забір листа по POP3/IMAP, аналіз заголовків, tcpdump.
 
 ---
@@ -527,24 +531,24 @@ openssl verify -CAfile certs/ca.cert.pem certs/mail.zone06.net.cert.pem
 
 Очікується `OK` для обох. Важливо: **CN серверного сертифіката має точно збігатись з іменем, за яким до сервера звертаються** (`mail.color.edu`), інакше клієнти видаватимуть попередження про невідповідність імені.
 
-### 1.7. Розкласти готові файли по робочих каталогах служб
+### 1.7. Розкласти готові файли по робочих каталогах служб (VM1)
 
 Решта лабораторної (Postfix/Dovecot) очікує сертифікати за фіксованими шляхами — переносимо туди готові файли з `~/ca`:
 
 ```bash
-mkdir -p /etc/ssl/colorCA/certs /etc/ssl/colorCA/server-color /etc/ssl/colorCA/server-zone06
+sudo mkdir -p /etc/ssl/colorCA/certs /etc/ssl/colorCA/server-color /etc/ssl/colorCA/server-zone06
 
-cp ~/ca/certs/ca.cert.pem                 /etc/ssl/colorCA/certs/
-cp ~/ca/certs/mail.color.edu.cert.pem     /etc/ssl/colorCA/server-color/
-cp ~/ca/private/mail.color.edu.key.pem    /etc/ssl/colorCA/server-color/
-cp ~/ca/certs/mail.zone06.net.cert.pem    /etc/ssl/colorCA/server-zone06/
-cp ~/ca/private/mail.zone06.net.key.pem   /etc/ssl/colorCA/server-zone06/
+sudo cp ~/ca/certs/ca.cert.pem                 /etc/ssl/colorCA/certs/
+sudo cp ~/ca/certs/mail.color.edu.cert.pem     /etc/ssl/colorCA/server-color/
+sudo cp ~/ca/private/mail.color.edu.key.pem    /etc/ssl/colorCA/server-color/
+sudo cp ~/ca/certs/mail.zone06.net.cert.pem    /etc/ssl/colorCA/server-zone06/
+sudo cp ~/ca/private/mail.zone06.net.key.pem   /etc/ssl/colorCA/server-zone06/
 
-chmod 400 /etc/ssl/colorCA/server-color/mail.color.edu.key.pem
-chmod 400 /etc/ssl/colorCA/server-zone06/mail.zone06.net.key.pem
+sudo chmod 400 /etc/ssl/colorCA/server-color/mail.color.edu.key.pem
+sudo chmod 400 /etc/ssl/colorCA/server-zone06/mail.zone06.net.key.pem
 ```
 
-> `~/ca` лишається "майстернею" CA (там живуть `index.txt`, `serial`, приватний ключ CA — тобто все, чим підписуємо) і далі знадобиться, якщо треба буде видати ще один сертифікат або відкликати існуючий. `/etc/ssl/colorCA/...` — те, що реально читають Postfix і Dovecot.
+> `~/ca` лишається "майстернею" CA (там живуть `index.txt`, `serial`, приватний ключ CA — тобто все, чим підписуємо) і далі знадобиться, якщо треба буде видати ще один сертифікат або відкликати існуючий. `/etc/ssl/colorCA/...` — те, що реально читають Postfix і Dovecot (обидві служби стартують від root і самі читають ключ, тому `chmod 400` їм не заважає).
 
 ### 1.8. Перенести сертифікат зони2 та CA на VM2
 
@@ -556,6 +560,8 @@ scp /etc/ssl/colorCA/certs/ca.cert.pem \
     student@192.168.106.20:/tmp/
 ```
 
+> Якщо `scp` скаржиться на права читання ключа (він `chmod 400` і належить root) — візьми ключ із `~/ca/private/mail.zone06.net.key.pem` (він твій) або тимчасово `sudo cp` його в домашню теку.
+
 На VM2:
 
 ```bash
@@ -563,6 +569,7 @@ sudo mkdir -p /etc/ssl/colorCA/certs /etc/ssl/mail
 sudo mv /tmp/ca.cert.pem /etc/ssl/colorCA/certs/
 sudo mv /tmp/mail.zone06.net.cert.pem /etc/ssl/mail/
 sudo mv /tmp/mail.zone06.net.key.pem  /etc/ssl/mail/
+sudo chown root:root /etc/ssl/mail/*
 sudo chmod 400 /etc/ssl/mail/mail.zone06.net.key.pem
 ```
 
@@ -573,7 +580,7 @@ sudo cp /etc/ssl/colorCA/certs/ca.cert.pem /usr/local/share/ca-certificates/colo
 sudo update-ca-certificates
 ```
 
-`update-ca-certificates` перечитує всі файли з `/usr/local/share/ca-certificates/` і додає їх у загальносистемне сховище довірених CA (`/etc/ssl/certs/ca-certificates.crt`) — після цього і `openssl`, і Postfix, і Dovecot довірятимуть нашим сертифікатам без попереджень.
+`update-ca-certificates` перечитує всі файли з `/usr/local/share/ca-certificates/` (розширення **обов'язково** `.crt`) і додає їх у загальносистемне сховище довірених CA (`/etc/ssl/certs/ca-certificates.crt`) — після цього і `openssl`, і Postfix, і Dovecot довірятимуть нашим сертифікатам без попереджень.
 
 ### 1.10. Якщо колись треба відкликати сертифікат (CRL)
 
@@ -673,26 +680,28 @@ dig @192.168.106.10 mail.color.edu A +short   # 192.168.106.10
 dig @192.168.106.20 zone06.net  MX +short     # має підхопитись через slave-transfer
 ```
 
+> **Важливо для пошти:** Postfix на кожній VM шукає MX сусіднього домену через системний резолвер. Переконайся, що в `/etc/resolv.conf` (або в налаштуваннях мережі) на обох VM nameserver — `192.168.106.10` (або `.20`), інакше `zone06.net` / `color.edu` не розрезолвляться і листи між доменами не підуть. Перевірка: `dig zone06.net MX +short` без `@`.
+
 ---
 
 ## Крок 3. Встановлення Postfix та Dovecot (на обох ВМ)
 
-> **Навіщо:** ставимо обидві служби одразу — Postfix прийматиме й пересилатиме листи (MTA/MSA), Dovecot зберігатиме їх і видаватиме клієнту по POP3/IMAP (MDA + одночасно "паролеперевіряч" для Postfix). Деталі ролей — розділ 1.9 вище.
+> **Навіщо:** ставимо обидві служби одразу — Postfix прийматиме й пересилатиме листи (MTA/MSA), Dovecot видаватиме їх клієнту по POP3/IMAP і одночасно перевірятиме паролі для Postfix. Деталі ролей — розділ 1.9 вище.
 
 ```bash
 sudo apt update
-sudo apt install -y postfix dovecot-core dovecot-imapd dovecot-pop3d mailutils
+sudo apt install -y postfix dovecot-core dovecot-imapd dovecot-pop3d mailutils swaks telnet
 ```
 
-Під час встановлення Postfix запитає тип конфігурації — вибрати **"Internet Site"**, а "System mail name" вказати відповідно до машини: на VM1 — `color.edu`, на VM2 — `zone06.net`.
+Під час встановлення Postfix запитає тип конфігурації — вибрати **"Internet Site"**, а "System mail name" вказати відповідно до машини: на VM1 — `color.edu`, на VM2 — `zone06.net`. (Усе це далі перезаписується в `main.cf`.)
 
 ---
 
 ## Крок 4. Налаштування Postfix на VM1 (домен `color.edu`)
 
-> **Навіщо:** за замовчуванням Postfix щойно після встановлення — майже "порожній" MTA без TLS і без обмежень на пересилку. Цим кроком ми: (1) кажемо йому, що саме він — кінцевий сервер для `color.edu`, тобто листи на `red@color.edu` він має приймати собі, а не кудись пересилати; (2) вмикаємо TLS-сертифікат, який зробили в Кроці 1; (3) вмикаємо перевірку пароля через Dovecot; (4) забороняємо будь-кому, крім "своїх", пересилати через нас пошту на чужі домени (інакше наш сервер стане відкритим релеєм для спаму).
+> **Навіщо:** за замовчуванням Postfix щойно після встановлення — майже "порожній" MTA без TLS і без обмежень на пересилку. Цим кроком ми: (1) кажемо йому, що саме він — кінцевий сервер для віртуального домену `color.edu`, тобто листи на `red@color.edu` він має приймати собі й класти у Maildir, а не кудись пересилати; (2) вмикаємо TLS-сертифікат, який зробили в Кроці 1; (3) вмикаємо перевірку пароля через Dovecot; (4) забороняємо будь-кому, крім "своїх", пересилати через нас пошту на чужі домени (інакше наш сервер стане відкритим релеєм для спаму).
 >
-> **Важливо (змінено порівняно з попередньою версією):** скриньки `red/green/blue` — це **не системні Linux-акаунти**, а **віртуальні користувачі** — записи в окремому текстовому файлі, який веде Dovecot (пояснення — в розділі 1.9а нижче і в Кроці 4.3/Кроці 6). Тому в `main.cf` замість `mydestination` застосовуємо інший набір параметрів — `virtual_mailbox_*`.
+> Скриньки `red/green/blue` — це **віртуальні користувачі**, а не системні Linux-акаунти (пояснення — розділ 1.9). Тому домен `color.edu` оголошується не в `mydestination`, а в `virtual_mailbox_domains`.
 
 ### 4.1. Основний файл `main.cf`
 
@@ -700,7 +709,7 @@ sudo apt install -y postfix dovecot-core dovecot-imapd dovecot-pop3d mailutils
 sudo nano /etc/postfix/main.cf
 ```
 
-Ключові параметри (додати/змінити):
+Ключові параметри (додати/змінити; те, чого тут немає — `alias_maps`, `biff`, `smtpd_banner`, `compatibility_level` тощо — лишається як є за замовчуванням Debian):
 
 ```conf
 # ---------- Базова ідентифікація ----------
@@ -708,6 +717,9 @@ myhostname = mail.color.edu
 mydomain = color.edu
 myorigin = $mydomain
 mydestination = $myhostname, localhost
+mynetworks_style = host
+inet_interfaces = all
+inet_protocols = all
 
 # ---------- TLS для вхідних з'єднань (SMTP-сервер) ----------
 smtpd_tls_cert_file = /etc/ssl/colorCA/server-color/mail.color.edu.cert.pem
@@ -748,12 +760,14 @@ virtual_gid_maps = static:5000
 | `myhostname` | повне ім'я цього поштового сервера (те саме, що ми поставили в сертифікат і в MX) |
 | `mydomain` | домен, за який відповідає цей сервер |
 | `myorigin` | який домен підставляти в адресу відправника, якщо лист відправлено без повного домену |
-| `mydestination` | тепер містить **лише** `$myhostname` і `localhost` — сам домен `color.edu` звідси прибрано, бо його листи обробляються окремим, "віртуальним" механізмом нижче (якщо залишити `color.edu` і тут, і у `virtual_mailbox_domains`, Postfix видасть помилку "domain in both mydestination and virtual_mailbox_domains") |
+| `mydestination` | містить **лише** `$myhostname` і `localhost` — сам домен `color.edu` звідси прибрано, бо його листи обробляються окремим, "віртуальним" механізмом нижче (якщо залишити `color.edu` і тут, і у `virtual_mailbox_domains`, Postfix видасть помилку "domain in both mydestination and virtual_mailbox_domains") |
+| `mynetworks_style = host` | "своєю" мережею для `permit_mynetworks` вважається лише сам цей хост (127.0.0.0/8, ::1). Тобто інша VM **не** є довіреною — і пересилати через нас на зовнішні домени може лише після автентифікації |
 | `smtpd_tls_cert_file` / `smtpd_tls_key_file` | сертифікат і приватний ключ, які сервер показує клієнтам при `STARTTLS` |
 | `smtpd_tls_CAfile` | сертифікат CA, яким довіряти для перевірки клієнтських сертифікатів (якщо застосовується) |
 | `smtpd_use_tls = yes` | увімкнути підтримку TLS взагалі |
 | `smtpd_tls_security_level = may` | TLS **доступний, але не обов'язковий** для звичайного вхідного з'єднання (щоб зовнішні MTA без TLS теж могли достукатись — типова практика для порту 25); для власного submission (587) TLS зробимо обов'язковим окремо (крок 4.2) |
 | `smtpd_tls_auth_only = yes` | дозволяти команду `AUTH` **тільки після** `STARTTLS` — критично важливо, інакше пароль піде у відкритому вигляді |
+| `smtp_tls_CAfile`, `smtp_tls_security_level = may` | те саме, але коли **ми** виступаємо клієнтом і пересилаємо лист на інший сервер (VM1 → VM2): пробуємо TLS і перевіряємо сертифікат нашим CA |
 | `smtpd_sasl_type = dovecot` | автентифікацію робити через Dovecot (а не через власний механізм Postfix) |
 | `smtpd_sasl_path = private/auth` | шлях до Unix-сокета, через який Postfix спілкується з Dovecot SASL (відносно `queue_directory`, реально це `/var/spool/postfix/private/auth`) |
 | `smtpd_sasl_auth_enable = yes` | увімкнути можливість автентифікації взагалі |
@@ -767,7 +781,7 @@ virtual_gid_maps = static:5000
 
 1. `permit_mynetworks` — дозволити реле без обмежень, якщо запит іде з "довіреної" локальної мережі (`mynetworks`).
 2. `permit_sasl_authenticated` — дозволити реле, якщо клієнт **успішно автентифікувався**.
-3. `reject_unauth_destination` — **все інше відхилити**. Саме цей рядок і перетворює сервер із "відкритого релею" (open relay) на безпечний — чужі неавтентифіковані клієнти не зможуть слати через нас пошту на зовнішні домени.
+3. `reject_unauth_destination` — **все інше відхилити**, окрім листів, адресованих нашим власним доменам (`virtual_mailbox_domains`). Саме цей рядок і перетворює сервер із "відкритого релею" (open relay) на безпечний — чужі неавтентифіковані клієнти не зможуть слати через нас пошту на зовнішні домени, але лист *для* `red@color.edu` від будь-кого приймається.
 
 ### 4.2. Окремий порт 587 (submission) з обов'язковим TLS+AUTH
 
@@ -793,7 +807,7 @@ submission inet n       -       y       -       -       smtpd
 | `smtpd_tls_security_level=encrypt` | тут TLS **обов'язковий** (на відміну від `may` на 25-му порту) — саме тут виконується вимога "TLS для передачі повідомлень" від MUA |
 | `smtpd_relay_restrictions=permit_sasl_authenticated,reject` | на цьому порту приймаємо пошту **тільки** від автентифікованих користувачів, все інше — відмова. Це і є "обов'язкова автентифікація при відправленні" з п. 2.3 |
 
-### 4.3. Створення поштових скриньок (віртуальні користувачі)
+### 4.3. Створення поштових скриньок (віртуальні користувачі) — частина Postfix
 
 Спочатку — **один** службовий системний користувач `vmail`, під яким фізично зберігатимуться листи всіх віртуальних скриньок (він не є поштовою скринькою сам по собі, і логінитись під ним ніхто не буде):
 
@@ -831,10 +845,10 @@ sudo postmap /etc/postfix/vmailbox
 | Частина | Що означає |
 |---|---|
 | ліва колонка | повна поштова адреса — те, що приходить у `RCPT TO:` |
-| права колонка | шлях **відносно** `virtual_mailbox_base` (`/var/mail/vhosts`), куди Postfix фізично покладе лист |
+| права колонка | шлях **відносно** `virtual_mailbox_base` (`/var/mail/vhosts`), куди Postfix фізично покладе лист. **Кінцевий `/` обов'язковий** — він означає формат Maildir (без нього Postfix писатиме в один файл у форматі mbox) |
 | `postmap` | компілює текстовий файл у швидкий бінарний індекс `vmailbox.db` — Postfix читає саме `.db`-файл, і **після кожної зміни тексту `vmailbox` команду `postmap` треба запускати заново** |
 
-І нарешті — самі логіни й паролі для **входу** (POP3/IMAP/SMTP AUTH). Це вже не стосується Postfix — тут ми переходимо до Dovecot (дивись Крок 6.6), саме там заводиться файл `/etc/dovecot/users` з рядками `red@color.edu:пароль` для red/green/blue.
+І нарешті — самі логіни й паролі для **входу** (POP3/IMAP/SMTP AUTH). Це вже не стосується Postfix — це робиться в Dovecot: файл `/etc/dovecot/users`, див. **Крок 6.6**.
 
 ### 4.4. Перезапуск
 
@@ -844,7 +858,7 @@ sudo systemctl restart postfix
 sudo systemctl status postfix
 ```
 
-`postfix check` — аналог `named-checkconf` для Postfix: перевіряє права доступу до файлів і синтаксис `main.cf`/`master.cf`, нічого не виводить при успіху.
+`postfix check` — аналог `named-checkconf` для Postfix: перевіряє права доступу до файлів і синтаксис `main.cf`/`master.cf`, нічого не виводить при успіху. Ефективну конфігурацію можна переглянути командою `postconf -n`.
 
 ---
 
@@ -859,6 +873,9 @@ myhostname = mail.zone06.net
 mydomain = zone06.net
 myorigin = $mydomain
 mydestination = $myhostname, localhost
+mynetworks_style = host
+inet_interfaces = all
+inet_protocols = all
 
 smtpd_tls_cert_file = /etc/ssl/mail/mail.zone06.net.cert.pem
 smtpd_tls_key_file  = /etc/ssl/mail/mail.zone06.net.key.pem
@@ -887,7 +904,7 @@ virtual_uid_maps = static:5000
 virtual_gid_maps = static:5000
 ```
 
-`master.cf` — той самий блок `submission`, що й на VM1. `mydestination` так само без `zone06.net` — цей домен тепер віртуальний.
+`master.cf` — той самий блок `submission` (крок 4.2), що й на VM1. `mydestination` так само без `zone06.net` — цей домен віртуальний.
 
 Віртуальні скриньки (так само, як у кроці 4.3, тільки для `black`/`white`):
 
@@ -907,75 +924,112 @@ white@zone06.net   zone06.net/white/Maildir/
 
 ```bash
 sudo postmap /etc/postfix/vmailbox
-```
-
-```bash
 sudo postfix check
 sudo systemctl restart postfix
 ```
 
+Логіни й паролі для `black@zone06.net` / `white@zone06.net` — у файлі `/etc/dovecot/users` на VM2 (Крок 6.6).
+
 ---
 
-## Крок 6. Налаштування Dovecot (на обох ВМ, значення нижче — для VM1; на VM2 підставити свої шляхи до сертифіката)
+## Крок 6. Налаштування Dovecot 2.4 (на обох ВМ, значення нижче — для VM1; на VM2 підставити свої шляхи до сертифіката та свій список користувачів)
 
-> **Навіщо:** Postfix у Кроці 4-5 уже вміє приймати листи й вимагати пароль — але сам пароль ніхто ще не перевіряє, і сам процес "видати лист клієнту по POP3/IMAP" поки не налаштований узагалі. Цим кроком ми: (1) кажемо Dovecot, де на диску шукати листи користувача; (2) вмикаємо TLS і для POP3/IMAP теж (своїм, не тим самим портом, що в Postfix); (3) відкриваємо той самий сокет, яким щойно "обіцяли" скористатись у `main.cf` Postfix (`smtpd_sasl_path`), — без цього кроку Postfix стукав би в порожнечу і автентифікація падала б з помилкою.
+> **Навіщо:** Postfix у Кроці 4–5 уже вміє приймати листи й вимагати пароль — але сам пароль ніхто ще не перевіряє, і сам процес "видати лист клієнту по POP3/IMAP" поки не налаштований узагалі. Цим кроком ми: (1) кажемо Dovecot, де на диску шукати листи віртуального користувача; (2) вмикаємо TLS для POP3/IMAP; (3) відкриваємо той самий сокет, яким щойно "обіцяли" скористатись у `main.cf` Postfix (`smtpd_sasl_path`) — без цього кроку Postfix стукав би в порожнечу і автентифікація падала б з помилкою; (4) заводимо файл віртуальних користувачів.
 
-### 6.1. Протоколи та формат зберігання листів
+> **Як влаштована конфігурація Dovecot 2.4 на Debian 13.** Головний файл `/etc/dovecot/dovecot.conf` майже нічого не містить сам — він підключає решту рядком `!include conf.d/*.conf`. Тому налаштування лежать **по різних файлах** у `/etc/dovecot/conf.d/`, і кожен пункт нижче вказує, **який саме файл** редагувати:
+>
+> | Файл | Що в ньому налаштовуємо |
+> |---|---|
+> | `/etc/dovecot/dovecot.conf` | версія конфіга, `protocols` (6.2) |
+> | `/etc/dovecot/conf.d/10-mail.conf` | де і в якому форматі лежать листи (6.1) |
+> | `/etc/dovecot/conf.d/10-ssl.conf` | TLS-сертифікат (6.3) |
+> | `/etc/dovecot/conf.d/10-master.conf` | порти POP3/IMAP (6.4) і SASL-сокет для Postfix (6.5) |
+> | `/etc/dovecot/conf.d/10-auth.conf` | механізми автентифікації і який `passdb`/`userdb` підключити (6.6) |
+> | `/etc/dovecot/conf.d/auth-passwdfile.conf.ext` | сам опис `passdb`/`userdb` для файлу паролів (6.6) |
+> | `/etc/dovecot/users` | логіни й паролі віртуальних користувачів (6.6) |
+>
+> Синтаксис 2.4 відрізняється від 2.3: `mail_location` → `mail_driver` + `mail_path`; змінні `%d`/`%n` → `%{user | domain}`/`%{user | username}`; сертифікат задається як `ssl_server_cert_file = /шлях` (**без** `<` перед шляхом); перший рядок конфіга — `dovecot_config_version`. Файли містять багато закоментованих рядків із поясненнями — їх не чіпаємо, а потрібні параметри або розкоментовуємо, або дописуємо поряд. Що реально діє в результаті, завжди видно командою `doveconf -n` (6.8).
+
+### 6.1. Де лежать листи — `/etc/dovecot/conf.d/10-mail.conf`
 
 ```bash
 sudo nano /etc/dovecot/conf.d/10-mail.conf
 ```
 
+Знайти блок "Debian defaults" (там закоментовані `mail_driver = mbox`, `mail_home`, `mail_path = %{home}/mail`, `mail_inbox_path`) і **під ним** залишити/дописати такі активні рядки:
+
 ```conf
-mail_path = maildir:/var/mail/vhosts/%d/%n/Maildir
-mail_uid = vmail
-mail_gid = vmail
+mail_driver = maildir
+mail_path = /var/mail/vhosts/%{user | domain}/%{user | username}/Maildir
+mail_uid = 5000
+mail_gid = 5000
 first_valid_uid = 5000
 last_valid_uid = 5000
 ```
 
+Нижче в тому ж файлі вже є блок `namespace inbox { inbox = yes ... }` і рядок `mail_privileged_group = mail` — їх **не змінюємо**.
+
 | Параметр | Що означає |
 |---|---|
-| `mail_location` | де фізично лежать листи. `%d` і `%n` — це **підстановки Dovecot**: `%d` розгортається в домен користувача (`color.edu`), `%n` — у частину логіна до `@` (`red`). Тобто для `red@color.edu` вийде саме той шлях, що ми вже створили в кроці 4.3: `/var/mail/vhosts/color.edu/red/Maildir` |
-| `maildir` | формат зберігання, де кожен лист — окремий файл (на відміну від `mbox`, де всі листи в одному файлі). Надійніший при паралельному доступі й стандартний для сучасних систем |
-| `mail_uid` / `mail_gid` | під яким системним користувачем Dovecot фактично читає/пише ці файли — наш службовий `vmail`, той самий, що й у Postfix (`virtual_uid_maps`) |
-| `first_valid_uid` / `last_valid_uid` | діапазон дозволених UID для володіння поштовими файлами — звужуємо до одного конкретного `5000`, щоб Dovecot не погоджувався працювати з жодним іншим (додатковий захист від помилки конфігурації) |
+| `mail_driver = maildir` | формат зберігання, де кожен лист — окремий файл (на відміну від `mbox`, де всі листи в одному файлі). Надійніший при паралельному доступі й стандартний для сучасних систем. Закоментований у файлі `mbox` залишаємо закоментованим |
+| `mail_path` | де фізично лежать листи. `%{user \| domain}` розгортається в домен користувача (`color.edu`), `%{user \| username}` — у частину логіна до `@` (`red`). Тобто для `red@color.edu` вийде саме той шлях, що ми створили в кроці 4.3: `/var/mail/vhosts/color.edu/red/Maildir` |
+| `mail_uid` / `mail_gid` | під яким системним користувачем Dovecot фактично читає/пише ці файли — наш службовий `vmail` (5000), той самий, що й у Postfix (`virtual_uid_maps`) |
+| `first_valid_uid` / `last_valid_uid` | діапазон дозволених UID для володіння поштовими файлами — звужуємо до одного конкретного `5000`, щоб Dovecot не погоджувався працювати з жодним іншим (додатковий захист від помилки конфігурації). Закоментовані дефолтні `#first_valid_uid = 500` / `#last_valid_uid = 0` нижче по файлу не чіпаємо |
 
-### 6.2. Список активних протоколів
+### 6.2. Протоколи — `/etc/dovecot/dovecot.conf`
 
-```bash
-sudo nano /etc/dovecot/dovecot.conf
-```
+Цей файл правити майже не треба — перевір, що в ньому є:
 
 ```conf
+dovecot_config_version = 2.4.0
+dovecot_storage_version = 2.4.0
+
 protocols = imap pop3
 ```
 
-### 6.3. TLS
+і в самому кінці — `!include conf.d/*.conf` (саме він підтягує всі файли `10-*.conf`). `lmtp` не вмикаємо — доставку листів робить сам Postfix.
+
+### 6.3. TLS — `/etc/dovecot/conf.d/10-ssl.conf`
 
 ```bash
 sudo nano /etc/dovecot/conf.d/10-ssl.conf
 ```
 
+Активні рядки на VM1:
+
 ```conf
 ssl = required
-ssl_server_cert_file = </etc/ssl/colorCA/server-color/mail.color.edu.cert.pem
-ssl_server_key_file  = </etc/ssl/colorCA/server-color/mail.color.edu.key.pem
-ssl_server_ca_file   = </etc/ssl/colorCA/certs/ca.cert.pem
+ssl_server_cert_file = /etc/ssl/colorCA/server-color/mail.color.edu.cert.pem
+ssl_server_key_file  = /etc/ssl/colorCA/server-color/mail.color.edu.key.pem
+ssl_server_ca_file   = /etc/ssl/colorCA/certs/ca.cert.pem
+```
+
+Закоментовані Debian-ні `#ssl_server_cert_file = /etc/dovecot/private/dovecot.pem` та `#ssl_server_key_file = ...` залишаються закоментованими — інакше вони перекриють наші. Рядок `ssl_min_protocol = TLSv1.2` теж лишається.
+
+На **VM2** шляхи інші:
+
+```conf
+ssl = required
+ssl_server_cert_file = /etc/ssl/mail/mail.zone06.net.cert.pem
+ssl_server_key_file  = /etc/ssl/mail/mail.zone06.net.key.pem
+ssl_server_ca_file   = /etc/ssl/colorCA/certs/ca.cert.pem
 ```
 
 | Параметр | Що означає |
 |---|---|
 | `ssl = required` | TLS обов'язковий для будь-якого логіну (і implicit-TLS порти 993/995, і STARTTLS на 143/110 без шифрування логін не пропустять) |
-| `<` перед шляхом | синтаксис Dovecot — означає "прочитати вміст файлу" (а не просто рядок-шлях) |
+| `ssl_server_cert_file` / `ssl_server_key_file` | сертифікат і приватний ключ сервера. Значення — **просто шляхи до файлів**, без `<` (він був потрібен у 2.3, у 2.4 більше не використовується) |
+| `ssl_server_ca_file` | сертифікат нашого CA |
 
-### 6.4. Порти POP3/IMAP
+> `doveconf -n` виводить ці три параметри згрупованими в блок `ssl_server { ca_file = ... cert_file = ... key_file = ... }` — це лише форма виводу, у файлі пишемо плоскі `ssl_server_*_file`.
+
+### 6.4. Порти POP3/IMAP — `/etc/dovecot/conf.d/10-master.conf`
 
 ```bash
 sudo nano /etc/dovecot/conf.d/10-master.conf
 ```
 
-Переконатись, що є (зазвичай увімкнено за замовчуванням):
+Блоки `service imap-login` і `service pop3-login` мають виглядати так (зазвичай вони такими вже є — просто перевір, що порти не закоментовані):
 
 ```conf
 service imap-login {
@@ -999,18 +1053,23 @@ service pop3-login {
 }
 ```
 
-### 6.5. SASL-сокет для Postfix (щоб Postfix міг перевіряти паролі через Dovecot)
+Блоки `submission-login`, `lmtp`, `imap`, `pop3`, `submission`, `auth-worker`, `dict` у цьому файлі залишаємо як є.
 
-```bash
-sudo nano /etc/dovecot/conf.d/10-master.conf
-```
+### 6.5. SASL-сокет для Postfix — той самий `/etc/dovecot/conf.d/10-master.conf`
 
-Додати всередину блоку `service auth { ... }`:
+У цьому ж файлі знайти блок `service auth { ... }`. Там уже є `unix_listener auth-userdb { ... }` (чіпати не треба) — **поруч** додаємо другий `unix_listener` для Postfix (у файлі для нього навіть є готовий коментар `# Postfix smtp-auth`):
 
 ```conf
 service auth {
+  unix_listener auth-userdb {
+    #mode = 0666
+    #user =
+    #group =
+  }
+
+  # Postfix smtp-auth
   unix_listener /var/spool/postfix/private/auth {
-    mode = 0660
+    mode = 0666
     user = postfix
     group = postfix
   }
@@ -1019,35 +1078,179 @@ service auth {
 
 | Параметр | Що означає |
 |---|---|
-| `unix_listener /var/spool/postfix/private/auth` | створити Unix-сокет саме за цим шляхом — це той самий `smtpd_sasl_path = private/auth`, який ми вказали в `main.cf` Postfix |
-| `mode = 0660`, `user/group = postfix` | права доступу — щоб саме процес Postfix міг писати/читати цей сокет |
+| `unix_listener /var/spool/postfix/private/auth` | створити Unix-сокет саме за цим шляхом — це той самий `smtpd_sasl_path = private/auth`, який ми вказали в `main.cf` Postfix (шлях відносно `/var/spool/postfix`, бо Postfix працює в chroot) |
+| `user = postfix`, `group = postfix` | власник сокета — процес Postfix |
+| `mode = 0666` | права доступу. Працює в лабораторній; на "бойовому" сервері краще суворіше `0660` — тоді доступ матимуть лише `postfix` і його група |
 
-### 6.6. Метод автентифікації (перевірка через системних користувачів Linux)
+### 6.6. Автентифікація і віртуальні користувачі
+
+Тут три файли: у `10-auth.conf` кажемо, **які механізми** дозволені і **який** файл з описом бази підключити; у `auth-passwdfile.conf.ext` описуємо саму базу; у `/etc/dovecot/users` лежать самі користувачі.
+
+#### а) `/etc/dovecot/conf.d/10-auth.conf`
 
 ```bash
 sudo nano /etc/dovecot/conf.d/10-auth.conf
 ```
 
+Активні рядки:
+
 ```conf
-disable_plaintext_auth = yes - не працює
 auth_mechanisms = plain login
-!include auth-system.conf.ext
+
+!include auth-passwdfile.conf.ext
 ```
 
-`disable_plaintext_auth = yes` — забороняє передавати логін/пароль відкритим текстом без TLS (узгоджено з `ssl = required` вище). `auth-system.conf.ext` — стандартний модуль, що перевіряє логін/пароль через `/etc/passwd` + `/etc/shadow` (тобто ті самі паролі, що ми задали через `passwd red` тощо).
+Усі інші `!include auth-*.conf.ext` (`auth-deny`, `auth-master`, `auth-oauth2`, **`auth-system`**, `auth-sql`, `auth-ldap`, `auth-static`) **мають бути закоментовані** (`#!include ...`). Саме `auth-system` у Debian зазвичай увімкнено — його треба закоментувати, бо інакше Dovecot додатково перевірятиме паролі системних Linux-акаунтів, а нам вони не потрібні.
 
-### 6.7. Перезапуск і перевірка
+| Параметр | Що означає |
+|---|---|
+| `auth_mechanisms = plain login` | дозволені механізми SASL (розділ 1.8). Передавати їх відкритим текстом без TLS Dovecot не дозволить — працює разом з `ssl = required` |
+| `!include auth-passwdfile.conf.ext` | підключити файл, у якому описано, що наші користувачі лежать у текстовому файлі (passwd-file) |
+
+#### б) `/etc/dovecot/conf.d/auth-passwdfile.conf.ext`
 
 ```bash
-sudo doveconf -n > /dev/null    # перевірка синтаксису, виводить лише активні параметри
+sudo nano /etc/dovecot/conf.d/auth-passwdfile.conf.ext
+```
+
+Вміст (замінити стандартний, закоментувавши або видаливши те, що там було):
+
+```conf
+passdb passwd-file {
+  passwd_file_path = /etc/dovecot/users
+  default_password_scheme = plain
+  auth_username_format = %{user}
+}
+
+userdb static {
+  auth_username_format = %{user}
+  fields {
+    uid  = 5000
+    gid  = 5000
+    home = /var/mail/vhosts/%{user | domain}/%{user | username}
+  }
+}
+```
+
+| Параметр | Що означає |
+|---|---|
+| `passdb passwd-file { ... }` | **де перевіряти пароль**: у текстовому файлі `/etc/dovecot/users`. Саме цей блок замінює стандартну перевірку через `/etc/passwd`+`/etc/shadow`, тому системних акаунтів нам не треба |
+| `passwd_file_path` | шлях до файлу з логінами й паролями |
+| `default_password_scheme = plain` | якщо в рядку пароля не вказано схему — вважати пароль відкритим текстом. У нас схема вказана явно: `{PLAIN}` |
+| `auth_username_format = %{user}` | брати логін як є, **повністю** (з `@домен`) — отже входити треба як `red@color.edu`, а не `red` |
+| `userdb static { fields { ... } }` | **де лежать дані користувача**: усім користувачам статично призначається UID/GID `vmail` (5000) і домашня тека на основі їхньої адреси. Окремий запис у userdb для кожного не потрібен |
+
+> `doveconf -n` у блоці `userdb static` може додатково показувати `passwd_file_path` — для `static` це нічого не змінює, перевірку пароля робить `passdb`.
+
+#### в) Файл віртуальних користувачів `/etc/dovecot/users` (як додавати користувачів)
+
+Це і є ті самі "скриньки з паролями" — **один рядок = один користувач**, формат:
+
+```
+повна_адреса:{СХЕМА}пароль
+```
+
+**VM1** (`color.edu`):
+
+```bash
+sudo nano /etc/dovecot/users
+```
+
+```
+red@color.edu:{PLAIN}123456
+green@color.edu:{PLAIN}123456
+blue@color.edu:{PLAIN}123456
+```
+
+**VM2** (`zone06.net`):
+
+```
+black@zone06.net:{PLAIN}123456
+white@zone06.net:{PLAIN}123456
+```
+
+Права на файл — його не повинен читати будь-хто (там паролі), але Dovecot мусить:
+
+```bash
+sudo chown root:dovecot /etc/dovecot/users
+sudo chmod 640 /etc/dovecot/users
+```
+
+| Частина рядка | Що означає |
+|---|---|
+| `red@color.edu` | логін — **повна адреса**. Саме її клієнт вводить при `LOGIN`/`USER`/`AUTH`, а `%{user \| domain}` і `%{user \| username}` з `mail_path` беруть з неї домен і ім'я |
+| `{PLAIN}` | схема паролю — "відкритий текст". Для лабораторної зручно (видно, що вводити); пароль `123456` — лише для стенда |
+| `123456` | сам пароль |
+
+**Безпечніший варіант (необов'язково, але гарна практика для звіту).** Замість `{PLAIN}` зберігати хеш:
+
+```bash
+doveadm pw -s SHA512-CRYPT
+# Enter new password: ...
+# {SHA512-CRYPT}$6$....
+```
+
+Отриманий рядок вставляємо замість `{PLAIN}123456`:
+
+```
+red@color.edu:{SHA512-CRYPT}$6$...довгий_хеш...
+```
+
+Dovecot сам визначає схему за префіксом у фігурних дужках, тому в одному файлі можна змішувати різні схеми.
+
+> Перезапускати Dovecot після зміни файла `users` зазвичай не потрібно — він читається при кожній автентифікації.
+
+### 6.7. Чек-лист: як додати нового віртуального користувача
+
+Приклад — додаємо `violet@color.edu` на VM1:
+
+1. **Тека для листів** (власник — `vmail`):
+   ```bash
+   sudo mkdir -p /var/mail/vhosts/color.edu/violet/Maildir
+   sudo chown -R vmail:vmail /var/mail/vhosts/color.edu/violet
+   ```
+2. **Postfix** — додати рядок у `/etc/postfix/vmailbox`:
+   ```
+   violet@color.edu   color.edu/violet/Maildir/
+   ```
+3. **Перекомпілювати мапу**:
+   ```bash
+   sudo postmap /etc/postfix/vmailbox
+   sudo postfix reload
+   ```
+4. **Dovecot** — додати рядок у `/etc/dovecot/users`:
+   ```
+   violet@color.edu:{PLAIN}123456
+   ```
+
+Без п. 2–3 Postfix відповість `User unknown in virtual mailbox table` (лист на скриньку не прийме). Без п. 4 лист прийметься, але забрати його по POP3/IMAP і надіслати пошту з автентифікацією ця людина не зможе. Видалення користувача — те саме у зворотному порядку (рядок у `users`, рядок у `vmailbox` + `postmap`, за потреби — тека).
+
+### 6.8. Перезапуск і перевірка
+
+```bash
+sudo doveconf -n > /dev/null    # перевірка синтаксису; виводить лише активні параметри
+sudo doveconf -n                # подивитись, що реально діє (для звіту)
 sudo systemctl restart dovecot
 sudo systemctl status dovecot
 sudo ss -lnptu | grep -E ':143|:993|:110|:995'
 ```
 
+У виводі `doveconf -n` має бути видно (звір зі своїм): `protocols = imap pop3`, `ssl = required`, `mail_driver = maildir`, `mail_path = /var/mail/vhosts/%{user | domain}/%{user | username}/Maildir`, `first_valid_uid = 5000`, `last_valid_uid = 5000`, `passdb passwd-file { ... }`, `userdb static { ... }`, блок `ssl_server { ... }` з нашими сертифікатами, `service auth { unix_listener /var/spool/postfix/private/auth { group = postfix mode = 0666 user = postfix } }`. Якщо є ще один `passdb` (наприклад, `passdb system`) — отже `auth-system` лишився незакоментованим у `10-auth.conf`.
+
+Перевірити сам вхід користувача без клієнта:
+
+```bash
+sudo doveadm auth test red@color.edu 123456
+# passdb: red@color.edu auth succeeded
+sudo doveadm user red@color.edu
+# показує uid, gid, home для користувача
+```
+
 ---
 
 ## Крок 7. Перевірка роботи
+
+> У всіх прикладах нижче **логін — повна адреса** (`red@color.edu`, `black@zone06.net`), пароль із `/etc/dovecot/users` (у нас `123456`).
 
 ### 7.1. Звичайний SMTP-діалог вручну через telnet (без TLS, порт 25)
 
@@ -1068,6 +1271,8 @@ QUIT
 ```
 
 Так наочно видно "сирий" протокол — саме це і є матеріал для п. 2.6 завдання (аналіз протокольного обміну).
+
+> Корисна перевірка: `telnet` на порт 25 з іншої VM на **чужий** домен (наприклад, `RCPT TO:<someone@gmail.com>`) має дати `554 Relay access denied` — це доказ, що open relay закрито. А лист на **власний** домен (`green@color.edu`) прийметься без автентифікації — так і має бути.
 
 ### 7.2. STARTTLS вручну через openssl (перевірка сертифіката й шифрування)
 
@@ -1094,14 +1299,19 @@ DATA
 ...
 ```
 
-Base64 логіна/пароля отримати так: `echo -n "red" | base64`.
+Base64 логіна/пароля (логін — **повна адреса**): 
+
+```bash
+echo -n "red@color.edu" | base64
+echo -n "123456" | base64
+```
 
 ### 7.3. Швидка перевірка через swaks (одна команда замість ручного діалогу)
 
 ```bash
 swaks --to green@color.edu --from red@color.edu \
   --server mail.color.edu --port 587 \
-  --auth LOGIN --auth-user red --auth-password 'ПАРОЛЬ' \
+  --auth LOGIN --auth-user red@color.edu --auth-password '123456' \
   --tls
 ```
 
@@ -1110,26 +1320,35 @@ swaks --to green@color.edu --from red@color.edu \
 | `--to` / `--from` | envelope-отримувач / envelope-відправник |
 | `--server` / `--port` | куди підключатись |
 | `--auth LOGIN` | механізм автентифікації |
-| `--auth-user` / `--auth-password` | облікові дані |
+| `--auth-user` / `--auth-password` | облікові дані (логін — повна адреса) |
 | `--tls` | вимагати STARTTLS перед відправкою (аналог ручного кроку 7.2, тільки автоматично) |
 
 `swaks` сам покаже повний протокольний обмін (весь SMTP-діалог із кодами) — це зручно вставити прямо у звіт як доказ роботи.
 
 ### 7.4. Перевірка міждоменної пересилки (VM1 → VM2)
 
-Відправ лист з `red@color.edu` на `black@zone06.net` (як у прикладі вище) і подивись логи на обох машинах:
+Відправ лист з `red@color.edu` на `black@zone06.net`:
+
+```bash
+swaks --to black@zone06.net --from red@color.edu \
+  --server mail.color.edu --port 587 \
+  --auth LOGIN --auth-user red@color.edu --auth-password '123456' --tls
+```
+
+Подивись логи на обох машинах. На Debian 13 файла `/var/log/mail.log` може не бути (немає rsyslog) — тоді читаємо журнал systemd:
 
 ```bash
 # на VM1 (відправник)
-sudo tail -f /var/log/mail.log
+sudo journalctl -f | grep -E 'postfix|dovecot'
+# або, якщо встановлено rsyslog:  sudo tail -f /var/log/mail.log
 ```
 
 Побачиш рядки на кшталт `status=sent (250 2.0.0 Ok: queued as ...)` — підтвердження, що лист прийнято сервером VM2.
 
 ```bash
 # на VM2 (отримувач)
-sudo tail -f /var/log/mail.log
-ls -la /home/black/Maildir/new/     # тут з'явиться файл нового листа
+sudo journalctl -f | grep -E 'postfix|dovecot'
+sudo ls -la /var/mail/vhosts/zone06.net/black/Maildir/new/     # тут з'явиться файл нового листа
 ```
 
 ### 7.5. Забір листа по POP3 (порт 995, TLS)
@@ -1138,11 +1357,11 @@ ls -la /home/black/Maildir/new/     # тут з'явиться файл ново
 openssl s_client -connect mail.zone06.net:995 -CAfile /etc/ssl/colorCA/certs/ca.cert.pem -quiet
 ```
 
-Далі вручну:
+Далі вручну (логін — повна адреса):
 
 ```
-USER black
-PASS ПАРОЛЬ
+USER black@zone06.net
+PASS 123456
 STAT
 LIST
 RETR 1
@@ -1156,7 +1375,7 @@ openssl s_client -connect mail.zone06.net:993 -CAfile /etc/ssl/colorCA/certs/ca.
 ```
 
 ```
-a1 LOGIN black ПАРОЛЬ
+a1 LOGIN black@zone06.net 123456
 a2 SELECT INBOX
 a3 FETCH 1 BODY[]
 a4 LOGOUT
@@ -1165,8 +1384,10 @@ a4 LOGOUT
 ### 7.7. Аналіз заголовків отриманого листа
 
 ```bash
-cat /home/black/Maildir/new/*
+sudo cat /var/mail/vhosts/zone06.net/black/Maildir/new/*
 ```
+
+(після того, як лист прочитано по IMAP/POP3, він переміщується з `new/` в `cur/`).
 
 Знайти рядки `Received:` — їх буде **два**: один додав Postfix на VM1 (передача від MUA до MTA1), другий — Postfix на VM2 (прийом від MTA1). Читаючи знизу вгору, відновлюється шлях: клієнт → mail.color.edu → mail.zone06.net → скринька black.
 
@@ -1178,7 +1399,7 @@ sudo tcpdump -i enp0s8 -n port 587       # submission, видно момент �
 sudo tcpdump -i enp0s8 -n port 993       # IMAP TLS — весь трафік вже зашифрований, видно лише TLS handshake
 ```
 
-`-A` — виводити вміст пакетів у ASCII, щоб бачити самі SMTP-команди в незашифрованому трафіку. На порту 993/995/зашифрованому 587-після-STARTTLS текст команд побачити вже не вдасться — і це саме та демонстрація, яку варто показати в звіті як доказ, що TLS справді працює.
+`-A` — виводити вміст пакетів у ASCII, щоб бачити самі SMTP-команди в незашифрованому трафіку. На порту 993/995/зашифрованому 587-після-STARTTLS текст команд побачити вже не вдасться — і це саме та демонстрація, яку варто показати в звіті як доказ, що TLS справді працює. (Назву інтерфейсу `enp0s8` заміни на свою — `ip -br a`.)
 
 ---
 
@@ -1186,12 +1407,17 @@ sudo tcpdump -i enp0s8 -n port 993       # IMAP TLS — весь трафік в
 
 | Симптом | Причина |
 |---|---|
-| `Relay access denied` | лист адресовано на зовнішній домен, але клієнт не пройшов `permit_sasl_authenticated`/`permit_mynetworks` — перевір `smtpd_relay_restrictions` |
+| `Relay access denied` | лист адресовано на зовнішній домен, але клієнт не пройшов `permit_sasl_authenticated`/`permit_mynetworks` — перевір `smtpd_relay_restrictions` і що автентифікація відбулась (`--auth`, `--tls`) |
 | `Certificate verify failed` в openssl | не виконано `update-ca-certificates`, або CN сертифіката не збігається з іменем, до якого звертаєшся |
-| Пошта не йде на інший домен | немає MX-запису, або він не оновився (не збільшено Serial / не пройшов zone transfer) |
-| `SASL authentication failed` | Postfix не бачить сокет Dovecot — перевір `smtpd_sasl_path`, права на `/var/spool/postfix/private/auth`, чи Postfix "бачить" chroot (сокет має бути всередині `/var/spool/postfix`, бо Postfix може працювати в chroot) |
+| Пошта не йде на інший домен | немає MX-запису, він не оновився (не збільшено Serial / не пройшов zone transfer), або VM не використовує наш DNS у `/etc/resolv.conf` |
+| `SASL authentication failed` | Postfix не бачить сокет Dovecot — перевір `smtpd_sasl_path`, права на `/var/spool/postfix/private/auth`, чи Dovecot запущений; **або логін введено без домену** (треба `red@color.edu`, а не `red`) |
+| `auth failed` / `authentication failed` при POP3/IMAP | неправильний логін (без `@домен`), пароль не збігається з `/etc/dovecot/users`, або права на файл `users` не дозволяють Dovecot його читати (`chown root:dovecot`, `chmod 640`). Діагностика: `sudo doveadm auth test red@color.edu 123456` |
+| `User unknown in virtual mailbox table` | адреси немає у `/etc/postfix/vmailbox`, або після змін не виконано `postmap` |
+| `Permission denied` / лист не лягає в Maildir | тека скриньки не належить `vmail` (`chown -R vmail:vmail /var/mail/vhosts`), або UID/GID у Postfix (`virtual_uid_maps`) і в Dovecot (`mail_uid`) не збігаються |
+| `domain in both mydestination and virtual_mailbox_domains` | домен залишився в `mydestination` — залиш там лише `$myhostname, localhost` |
 | Лист "зависає" в черзі | `mailq` — подивитись чергу; `postfix flush` — примусово спробувати доставити |
-| Dovecot не стартує | `doveconf -n` покаже помилку конфігурації; перевір шляхи до сертифікатів |
+| Dovecot не стартує | `doveconf -n` покаже помилку конфігурації; перевір, що перший рядок — `dovecot_config_version`, шляхи до сертифікатів (без `<` перед ними) і відсутність застарілих параметрів 2.3 (`mail_location`, `ssl_cert`, `%u`/`%d`/`%n`) |
+| Логів Postfix/Dovecot немає в `/var/log/mail.log` | на Debian 13 логи йдуть у journald: `sudo journalctl -u postfix@- -u dovecot` або `sudo journalctl | grep -E 'postfix|dovecot'` (або встанови `rsyslog`) |
 
 ---
 
