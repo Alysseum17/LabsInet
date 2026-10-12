@@ -285,9 +285,25 @@ MUA red@color.edu              MTA1 (Postfix, VM1)             MTA2 (Postfix, VM
 | `/etc/dovecot/conf.d/10-mail.conf` | де і в якому форматі фізично зберігати листи користувача (`mail_location = maildir:~/Maildir`) |
 | `/etc/dovecot/conf.d/10-ssl.conf` | TLS-сертифікат/ключ для POP3S/IMAPS і правило "чи обов'язковий TLS" |
 | `/etc/dovecot/conf.d/10-master.conf` | які порти слухати (143/993/110/995) і — окремим блоком — опис сокета для SASL, яким користується Postfix |
-| `/etc/dovecot/conf.d/10-auth.conf` | яким способом перевіряти пароль (тут — через системних Linux-користувачів) |
+| `/etc/dovecot/conf.d/10-auth.conf` | яким способом перевіряти пароль (у нас — через окремий файл паролів, а не через системних Linux-користувачів, див. нижче) |
+| `/etc/dovecot/conf.d/auth-passwdfile.conf.ext` | підключає конкретний файл-джерело паролів (`passdb`) і правило, де шукати домашню теку/листи кожного користувача (`userdb`) |
+| `/etc/dovecot/users` | **сам файл з логінами й паролями віртуальних скриньок** — наш аналог того, що лектор у Exim4 тримав у `/etc/exim4/` |
 
 Коли далі в лабораторній будемо редагувати кожен із цих файлів — завжди тримай у голові це розділення: **Postfix вирішує, куди лист іде**, **Dovecot вирішує, де лист лежить і хто має право його забрати**.
+
+### Віртуальні користувачі замість системних Linux-акаунтів
+
+У попередній версії лабораторної скриньки `red`, `green`, `blue` робились командою `useradd` — тобто кожна поштова адреса відповідала **реальному користувачу Linux** з власним домашнім каталогом і паролем у `/etc/shadow`. Це найпростіший спосіб, але не той, що показував лектор.
+
+Лектор (на Exim4) зберігав користувачів **в окремому текстовому файлі**, а не як системних акаунтів. Це називається **віртуальні користувачі (virtual mailboxes)**, і для пари Postfix+Dovecot цей файл за змістом належить **Dovecot**, бо саме Dovecot виконує автентифікацію — Postfix лише звертається до нього через SASL-сокет (крок 6.5) і сам файл ніколи не читає.
+
+Як це влаштовано:
+
+1. Заводиться **один службовий системний користувач** `vmail` (не плутати з поштовими скриньками!) — він не належить жодній людині, а є лише "технічним власником" файлів листів на диску, щоб Dovecot мав куди писати.
+2. Усі листи всіх віртуальних скриньок лежать в одному спільному дереві `/var/mail/vhosts/<домен>/<ім'я>/Maildir/`, а не в розкиданих домашніх теках різних Linux-користувачів.
+3. У файлі `/etc/dovecot/users` — по рядку на кожну поштову адресу: логін (повна адреса `red@color.edu`) і пароль.
+4. Dovecot при вході читає цей файл (`passdb`) і окремим правилом (`userdb`) обчислює, де на диску шукати листи саме цього користувача.
+5. Postfix при прийомі листа на `red@color.edu` дивиться в окрему мапу відповідності «адреса → шлях на диску» (`virtual_mailbox_maps`) і кладе лист туди напряму, під UID користувача `vmail`.
 
 ---
 
@@ -675,6 +691,8 @@ sudo apt install -y postfix dovecot-core dovecot-imapd dovecot-pop3d mailutils
 ## Крок 4. Налаштування Postfix на VM1 (домен `color.edu`)
 
 > **Навіщо:** за замовчуванням Postfix щойно після встановлення — майже "порожній" MTA без TLS і без обмежень на пересилку. Цим кроком ми: (1) кажемо йому, що саме він — кінцевий сервер для `color.edu`, тобто листи на `red@color.edu` він має приймати собі, а не кудись пересилати; (2) вмикаємо TLS-сертифікат, який зробили в Кроці 1; (3) вмикаємо перевірку пароля через Dovecot; (4) забороняємо будь-кому, крім "своїх", пересилати через нас пошту на чужі домени (інакше наш сервер стане відкритим релеєм для спаму).
+>
+> **Важливо (змінено порівняно з попередньою версією):** скриньки `red/green/blue` — це **не системні Linux-акаунти**, а **віртуальні користувачі** — записи в окремому текстовому файлі, який веде Dovecot (пояснення — в розділі 1.9а нижче і в Кроці 4.3/Кроці 6). Тому в `main.cf` замість `mydestination` застосовуємо інший набір параметрів — `virtual_mailbox_*`.
 
 ### 4.1. Основний файл `main.cf`
 
@@ -689,7 +707,7 @@ sudo nano /etc/postfix/main.cf
 myhostname = mail.color.edu
 mydomain = color.edu
 myorigin = $mydomain
-mydestination = $myhostname, color.edu, localhost
+mydestination = $myhostname, localhost
 
 # ---------- TLS для вхідних з'єднань (SMTP-сервер) ----------
 smtpd_tls_cert_file = /etc/ssl/colorCA/server-color/mail.color.edu.cert.pem
@@ -713,6 +731,14 @@ smtpd_relay_restrictions =
     permit_mynetworks,
     permit_sasl_authenticated,
     reject_unauth_destination
+
+# ---------- Віртуальні поштові скриньки (замість системних користувачів) ----------
+virtual_mailbox_domains = color.edu
+virtual_mailbox_base = /var/mail/vhosts
+virtual_mailbox_maps = hash:/etc/postfix/vmailbox
+virtual_minimum_uid = 5000
+virtual_uid_maps = static:5000
+virtual_gid_maps = static:5000
 ```
 
 Розбір кожного параметра:
@@ -722,7 +748,7 @@ smtpd_relay_restrictions =
 | `myhostname` | повне ім'я цього поштового сервера (те саме, що ми поставили в сертифікат і в MX) |
 | `mydomain` | домен, за який відповідає цей сервер |
 | `myorigin` | який домен підставляти в адресу відправника, якщо лист відправлено без повного домену |
-| `mydestination` | **список доменів, для яких цей сервер є кінцевим отримувачем** — саме сюди приходять локальні листи (наприклад, на `red@color.edu`), а не пересилаються далі |
+| `mydestination` | тепер містить **лише** `$myhostname` і `localhost` — сам домен `color.edu` звідси прибрано, бо його листи обробляються окремим, "віртуальним" механізмом нижче (якщо залишити `color.edu` і тут, і у `virtual_mailbox_domains`, Postfix видасть помилку "domain in both mydestination and virtual_mailbox_domains") |
 | `smtpd_tls_cert_file` / `smtpd_tls_key_file` | сертифікат і приватний ключ, які сервер показує клієнтам при `STARTTLS` |
 | `smtpd_tls_CAfile` | сертифікат CA, яким довіряти для перевірки клієнтських сертифікатів (якщо застосовується) |
 | `smtpd_use_tls = yes` | увімкнути підтримку TLS взагалі |
@@ -732,6 +758,10 @@ smtpd_relay_restrictions =
 | `smtpd_sasl_path = private/auth` | шлях до Unix-сокета, через який Postfix спілкується з Dovecot SASL (відносно `queue_directory`, реально це `/var/spool/postfix/private/auth`) |
 | `smtpd_sasl_auth_enable = yes` | увімкнути можливість автентифікації взагалі |
 | `smtpd_relay_restrictions` | **найважливіше правило безпеки**: дивись нижче |
+| `virtual_mailbox_domains` | **список доменів, листи на які є "віртуальними скриньками"**, а не системними користувачами — саме для них Postfix шукатиме отримувача в `virtual_mailbox_maps`, а не в `/etc/passwd` |
+| `virtual_mailbox_base` | коренева тека, відносно якої будуються шляхи зі `vmailbox`-файлу (крок 4.3) |
+| `virtual_mailbox_maps` | файл-мапа «адреса → відносний шлях до Maildir цього користувача» |
+| `virtual_minimum_uid`, `virtual_uid_maps`, `virtual_gid_maps` | під яким UID/GID фізично писати листи на диск — не під UID реального користувача (бо такого немає), а під один службовий `static:5000` (той самий `vmail`, якого заведемо в кроці 4.3) |
 
 **Пояснення `smtpd_relay_restrictions` по порядку (правила перевіряються зверху вниз, перше співпадіння вирішує):**
 
@@ -763,21 +793,48 @@ submission inet n       -       y       -       -       smtpd
 | `smtpd_tls_security_level=encrypt` | тут TLS **обов'язковий** (на відміну від `may` на 25-му порту) — саме тут виконується вимога "TLS для передачі повідомлень" від MUA |
 | `smtpd_relay_restrictions=permit_sasl_authenticated,reject` | на цьому порту приймаємо пошту **тільки** від автентифікованих користувачів, все інше — відмова. Це і є "обов'язкова автентифікація при відправленні" з п. 2.3 |
 
-### 4.3. Створення поштових скриньок (системні користувачі)
+### 4.3. Створення поштових скриньок (віртуальні користувачі)
+
+Спочатку — **один** службовий системний користувач `vmail`, під яким фізично зберігатимуться листи всіх віртуальних скриньок (він не є поштовою скринькою сам по собі, і логінитись під ним ніхто не буде):
 
 ```bash
-sudo useradd -m -s /usr/sbin/nologin red
-sudo useradd -m -s /usr/sbin/nologin green
-sudo useradd -m -s /usr/sbin/nologin blue
-sudo passwd red      # задати пароль
-sudo passwd green
-sudo passwd blue
+sudo groupadd -g 5000 vmail
+sudo useradd -g vmail -u 5000 vmail -d /var/mail/vhosts -s /usr/sbin/nologin -m
+sudo mkdir -p /var/mail/vhosts/color.edu/{red,green,blue}/Maildir
+sudo chown -R vmail:vmail /var/mail/vhosts
 ```
 
-| Прапорець | Що означає |
+| Частина | Що означає |
 |---|---|
-| `-m` | створити домашню директорію користувача (там за замовчуванням Dovecot зберігатиме листи, `~/Maildir`) |
-| `-s /usr/sbin/nologin` | заборонити цьому користувачу **логінитись у систему через SSH/консоль** — це ж лише поштова скринька, не потрібен повноцінний shell-доступ |
+| `groupadd -g 5000 vmail` | створити групу з фіксованим GID 5000 (той самий номер, що ми прописали в `virtual_gid_maps = static:5000` у `main.cf`) |
+| `useradd -g vmail -u 5000 vmail -d /var/mail/vhosts ...` | створити користувача з тим самим UID і домашньою текою `/var/mail/vhosts` — саме в ній і лежатимуть усі скриньки |
+| `-s /usr/sbin/nologin` | заборонити вхід у систему під цим користувачем |
+| `mkdir -p .../{red,green,blue}/Maildir` | заздалегідь створити структуру тек для кожної скриньки |
+| `chown -R vmail:vmail` | все дерево має належати саме `vmail`, інакше Postfix/Dovecot не зможуть туди писати |
+
+Далі — файл-мапа Postfix «адреса → шлях на диску» (`virtual_mailbox_maps` з кроку 4.1):
+
+```bash
+sudo nano /etc/postfix/vmailbox
+```
+
+```
+red@color.edu     color.edu/red/Maildir/
+green@color.edu   color.edu/green/Maildir/
+blue@color.edu    color.edu/blue/Maildir/
+```
+
+```bash
+sudo postmap /etc/postfix/vmailbox
+```
+
+| Частина | Що означає |
+|---|---|
+| ліва колонка | повна поштова адреса — те, що приходить у `RCPT TO:` |
+| права колонка | шлях **відносно** `virtual_mailbox_base` (`/var/mail/vhosts`), куди Postfix фізично покладе лист |
+| `postmap` | компілює текстовий файл у швидкий бінарний індекс `vmailbox.db` — Postfix читає саме `.db`-файл, і **після кожної зміни тексту `vmailbox` команду `postmap` треба запускати заново** |
+
+І нарешті — самі логіни й паролі для **входу** (POP3/IMAP/SMTP AUTH). Це вже не стосується Postfix — тут ми переходимо до Dovecot (дивись Крок 6.6), саме там заводиться файл `/etc/dovecot/users` з рядками `red@color.edu:пароль` для red/green/blue.
 
 ### 4.4. Перезапуск
 
@@ -801,7 +858,7 @@ sudo systemctl status postfix
 myhostname = mail.zone06.net
 mydomain = zone06.net
 myorigin = $mydomain
-mydestination = $myhostname, zone06.net, localhost
+mydestination = $myhostname, localhost
 
 smtpd_tls_cert_file = /etc/ssl/mail/mail.zone06.net.cert.pem
 smtpd_tls_key_file  = /etc/ssl/mail/mail.zone06.net.key.pem
@@ -821,17 +878,35 @@ smtpd_relay_restrictions =
     permit_mynetworks,
     permit_sasl_authenticated,
     reject_unauth_destination
+
+virtual_mailbox_domains = zone06.net
+virtual_mailbox_base = /var/mail/vhosts
+virtual_mailbox_maps = hash:/etc/postfix/vmailbox
+virtual_minimum_uid = 5000
+virtual_uid_maps = static:5000
+virtual_gid_maps = static:5000
 ```
 
-`master.cf` — той самий блок `submission`, що й на VM1.
+`master.cf` — той самий блок `submission`, що й на VM1. `mydestination` так само без `zone06.net` — цей домен тепер віртуальний.
 
-Користувачі:
+Віртуальні скриньки (так само, як у кроці 4.3, тільки для `black`/`white`):
 
 ```bash
-sudo useradd -m -s /usr/sbin/nologin black
-sudo useradd -m -s /usr/sbin/nologin white
-sudo passwd black
-sudo passwd white
+sudo groupadd -g 5000 vmail
+sudo useradd -g vmail -u 5000 vmail -d /var/mail/vhosts -s /usr/sbin/nologin -m
+sudo mkdir -p /var/mail/vhosts/zone06.net/{black,white}/Maildir
+sudo chown -R vmail:vmail /var/mail/vhosts
+
+sudo nano /etc/postfix/vmailbox
+```
+
+```
+black@zone06.net   zone06.net/black/Maildir/
+white@zone06.net   zone06.net/white/Maildir/
+```
+
+```bash
+sudo postmap /etc/postfix/vmailbox
 ```
 
 ```bash
@@ -852,10 +927,19 @@ sudo nano /etc/dovecot/conf.d/10-mail.conf
 ```
 
 ```conf
-mail_location = maildir:~/Maildir
+mail_location = maildir:/var/mail/vhosts/%d/%n/Maildir
+mail_uid = vmail
+mail_gid = vmail
+first_valid_uid = 5000
+last_valid_uid = 5000
 ```
 
-`maildir` — формат зберігання, де кожен лист — окремий файл (на відміну від `mbox`, де всі листи в одному файлі). Maildir надійніший при паралельному доступі й саме він за замовчуванням для сучасних систем.
+| Параметр | Що означає |
+|---|---|
+| `mail_location` | де фізично лежать листи. `%d` і `%n` — це **підстановки Dovecot**: `%d` розгортається в домен користувача (`color.edu`), `%n` — у частину логіна до `@` (`red`). Тобто для `red@color.edu` вийде саме той шлях, що ми вже створили в кроці 4.3: `/var/mail/vhosts/color.edu/red/Maildir` |
+| `maildir` | формат зберігання, де кожен лист — окремий файл (на відміну від `mbox`, де всі листи в одному файлі). Надійніший при паралельному доступі й стандартний для сучасних систем |
+| `mail_uid` / `mail_gid` | під яким системним користувачем Dovecot фактично читає/пише ці файли — наш службовий `vmail`, той самий, що й у Postfix (`virtual_uid_maps`) |
+| `first_valid_uid` / `last_valid_uid` | діапазон дозволених UID для володіння поштовими файлами — звужуємо до одного конкретного `5000`, щоб Dovecot не погоджувався працювати з жодним іншим (додатковий захист від помилки конфігурації) |
 
 ### 6.2. Список активних протоколів
 
